@@ -10,16 +10,10 @@ from datetime import datetime, timedelta
 class APILayer:
     @staticmethod
     def fetch_finmind(dataset: str, data_id: str, days: int) -> pd.DataFrame:
-        """通用的 FinMind 數據抓取函數"""
         end_date = datetime.now().strftime('%Y-%m-%d')
         start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         url = "https://api.finmindtrade.com/api/v4/data"
-        params = {
-            "dataset": dataset,
-            "data_id": data_id,
-            "start_date": start_date,
-            "end_date": end_date
-        }
+        params = {"dataset": dataset, "data_id": data_id, "start_date": start_date, "end_date": end_date}
         try:
             response = requests.get(url, params=params, timeout=10 )
             data = response.json()
@@ -31,15 +25,10 @@ class APILayer:
 
     @staticmethod
     def get_kline_data(stock_id: str, days: int = 180) -> pd.DataFrame:
-        print(f"📥 正在獲取 {stock_id} 的 K 線數據...")
         df = APILayer.fetch_finmind("TaiwanStockPrice", stock_id, days)
         if df.empty:
             raise ValueError(f"獲取 K 線失敗，請檢查股票代號 {stock_id}。")
-            
-        df = df.rename(columns={
-            "date": "Date", "open": "Open", "max": "High", 
-            "min": "Low", "close": "Close", "Trading_Volume": "Volume"
-        })
+        df = df.rename(columns={"date": "Date", "open": "Open", "max": "High", "min": "Low", "close": "Close", "Trading_Volume": "Volume"})
         df['Date'] = pd.to_datetime(df['Date'])
         df.set_index('Date', inplace=True)
         cols_to_numeric = ['Open', 'High', 'Low', 'Close', 'Volume']
@@ -52,7 +41,6 @@ class APILayer:
 class IndicatorEngine:
     @staticmethod
     def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        print("🧮 正在計算技術指標...")
         df_ta = df.copy()
         df_ta['MA5'] = df_ta.ta.sma(length=5)
         df_ta['MA20'] = df_ta.ta.sma(length=20)
@@ -71,7 +59,6 @@ class IndicatorEngine:
 class PatternEngine:
     @staticmethod
     def analyze_patterns(df: pd.DataFrame) -> dict:
-        print("🔍 正在進行型態辨識...")
         if len(df) < 30: return {}
         today, yest, day3 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
         patterns = {}
@@ -106,73 +93,46 @@ class PatternEngine:
         return patterns
 
 # ==========================================
-# 4. Chip Engine (籌碼引擎) - 全新加入！
+# 4. Chip Engine (籌碼引擎)
 # ==========================================
 class ChipEngine:
     @staticmethod
     def analyze_chips(stock_id: str) -> dict:
-        print("🕵️ 正在分析籌碼面數據 (三大法人、融資券、大戶)...")
         chip_score = 10
         chip_details = []
         lending_warning = False
-        
         try:
-            # 1. 三大法人 (外資與投信)
             df_inst = APILayer.fetch_finmind("TaiwanStockInstitutionalInvestorsBuySell", stock_id, 10)
             if not df_inst.empty:
                 df_inst['diff'] = df_inst['buy'] - df_inst['sell']
                 recent_date = df_inst['date'].max()
                 today_inst = df_inst[df_inst['date'] == recent_date]
-                
                 foreign = today_inst[today_inst['name'].str.contains('外資', na=False)]['diff'].sum()
                 trust = today_inst[today_inst['name'].str.contains('投信', na=False)]['diff'].sum()
-                
-                if foreign > 0 and trust > 0:
-                    chip_score += 5; chip_details.append("外資與投信同步買超，法人籌碼偏多 (+5分)")
-                elif foreign < 0 and trust < 0:
-                    chip_score -= 5; chip_details.append("外資與投信同步賣超，法人籌碼偏空 (-5分)")
-                elif foreign > 0:
-                    chip_score += 3; chip_details.append("外資買超，籌碼偏多 (+3分)")
-                elif foreign < 0:
-                    chip_score -= 3; chip_details.append("外資賣超，籌碼偏空 (-3分)")
+                if foreign > 0 and trust > 0: chip_score += 5; chip_details.append("外資與投信同步買超 (+5分)")
+                elif foreign < 0 and trust < 0: chip_score -= 5; chip_details.append("外資與投信同步賣超 (-5分)")
+                elif foreign > 0: chip_score += 3; chip_details.append("外資買超 (+3分)")
+                elif foreign < 0: chip_score -= 3; chip_details.append("外資賣超 (-3分)")
                     
-            # 2. 融資融券 (散戶與借券風險)
             df_margin = APILayer.fetch_finmind("TaiwanStockMarginPurchaseShortSale", stock_id, 10)
             if not df_margin.empty:
                 df_margin = df_margin.sort_values('date')
-                margin_today = df_margin.iloc[-1]['MarginPurchaseTodayBalance']
-                margin_yest = df_margin.iloc[-2]['MarginPurchaseTodayBalance']
-                
-                if margin_today > margin_yest:
-                    chip_score -= 2; chip_details.append("融資餘額增加，散戶籌碼進場較凌亂 (-2分)")
-                else:
-                    chip_score += 2; chip_details.append("融資餘額減少，籌碼沉澱趨於穩定 (+2分)")
+                if len(df_margin) >= 2:
+                    margin_today = df_margin.iloc[-1]['MarginPurchaseTodayBalance']
+                    margin_yest = df_margin.iloc[-2]['MarginPurchaseTodayBalance']
+                    if margin_today > margin_yest: chip_score -= 2; chip_details.append("融資餘額增加 (-2分)")
+                    else: chip_score += 2; chip_details.append("融資餘額減少 (+2分)")
                     
-                # 借券/融券風險警示 (增加 5% 以上)
-                short_today = df_margin.iloc[-1]['ShortSaleTodayBalance']
-                short_yest = df_margin.iloc[-2]['ShortSaleTodayBalance']
-                if short_today > short_yest * 1.05:
-                    lending_warning = True
-                    chip_score -= 3; chip_details.append("⚠️ 融券/借券餘額顯著增加，需留意潛在賣壓 (-3分)")
-                    
-            # 3. 千張大戶 (每週更新)
-            df_share = APILayer.fetch_finmind("TaiwanStockShareholding", stock_id, 30)
-            if not df_share.empty:
-                df_big = df_share[df_share['HoldingSharesLevel'] == '15'].sort_values('date')
-                if len(df_big) >= 2:
-                    big_today = df_big.iloc[-1]['percent']
-                    big_yest = df_big.iloc[-2]['percent']
-                    if big_today > big_yest:
-                        chip_score += 5; chip_details.append(f"千張大戶持股比例上升至 {big_today}%，主力籌碼集中 (+5分)")
-                    elif big_today < big_yest:
-                        chip_score -= 5; chip_details.append(f"千張大戶持股比例下降至 {big_today}%，主力籌碼分散 (-5分)")
-                        
+                    short_today = df_margin.iloc[-1]['ShortSaleTodayBalance']
+                    short_yest = df_margin.iloc[-2]['ShortSaleTodayBalance']
+                    if short_today > short_yest * 1.05:
+                        lending_warning = True
+                        chip_score -= 3; chip_details.append("⚠️ 融券/借券餘額顯著增加 (-3分)")
         except Exception as e:
             chip_details.append(f"籌碼數據獲取異常: {str(e)}")
             
         chip_score = max(0, min(20, chip_score))
         if not chip_details: chip_details.append("籌碼面數據無明顯變化 (中性)")
-            
         return {"score": chip_score, "details": chip_details, "lending_warning": lending_warning}
 
 # ==========================================
@@ -181,12 +141,10 @@ class ChipEngine:
 class AIScoreEngine:
     @staticmethod
     def calculate_score(stock_id: str, df: pd.DataFrame, patterns: dict, chip_data: dict) -> dict:
-        print("⚖️ 正在計算 AI 綜合評分...")
         today = df.iloc[-1]
-        
-        # 技術面 (40%)
         tech_score = 0
         tech_details = []
+        
         if today['MA5'] > today['MA20']: tech_score += 10; tech_details.append("短均線大於長均線，趨勢偏多 (+10分)")
         else: tech_details.append("短均線小於長均線，趨勢偏空 (+0分)")
         if today.get('MACDh_12_26_9', 0) > 0: tech_score += 10; tech_details.append("MACD 柱狀圖翻紅，多方動能強 (+10分)")
@@ -197,7 +155,6 @@ class AIScoreEngine:
         if today.get('STOCHk_14_3_3', 0) > today.get('STOCHd_14_3_3', 0): tech_score += 10; tech_details.append("KD 指標 K值大於D值，呈現多頭 (+10分)")
         else: tech_details.append("KD 指標死亡交叉或偏空 (+0分)")
 
-        # 型態面 (20%)
         pattern_score = 10 
         pattern_details = []
         if patterns.get("W底"): pattern_score += 10; pattern_details.append("出現 W底 底部反轉型態 (+10分)")
@@ -209,14 +166,27 @@ class AIScoreEngine:
         pattern_score = max(0, min(20, pattern_score))
         if not pattern_details: pattern_details.append("目前無明顯特殊 K 線型態")
 
-        # 籌碼面 (20%) - 接入 ChipEngine 數據
         chip_score = chip_data["score"]
         chip_details = chip_data["details"]
-
-        # 期貨面 (20%) - 預設中性
         futures_score = 10
         futures_details = ["期貨大盤數據尚未串接 (預設中性 10分)"]
 
         total_score = tech_score + pattern_score + chip_score + futures_score
         
         if total_score >= 80: action = "強烈看多 (Strong Buy)"
+        elif total_score >= 60: action = "偏多看待 (Buy)"
+        elif total_score >= 40: action = "中性震盪 (Neutral)"
+        else: action = "偏空看待 (Sell)"
+
+        return {
+            "stock_id": stock_id,
+            "date": today.name.strftime('%Y-%m-%d'),
+            "total_score": total_score,
+            "action": action,
+            "breakdown": {
+                "Technical (40%)": {"score": tech_score, "details": tech_details},
+                "Pattern (20%)": {"score": pattern_score, "details": pattern_details},
+                "Chip (20%)": {"score": chip_score, "details": chip_details, "lending_warning": chip_data["lending_warning"]},
+                "Futures (20%)": {"score": futures_score, "details": futures_details}
+            }
+        }
