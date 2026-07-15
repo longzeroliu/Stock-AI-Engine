@@ -58,7 +58,6 @@ class IndicatorEngine:
         bbands = df_ta.ta.bbands(length=20, std=2)
         df_ta = pd.concat([df_ta, bbands], axis=1)
         
-        # 計算近20日支撐與壓力
         df_ta['Support'] = df_ta['Low'].rolling(20).min()
         df_ta['Resistance'] = df_ta['High'].rolling(20).max()
         
@@ -123,64 +122,94 @@ class MarketChipEngine:
         chip_details = []
         lending_warning = False
         
-        # 1. 三大法人
         try:
-            df_inst = APILayer.fetch_finmind("TaiwanStockInstitutionalInvestorsBuySell", stock_id, 10)
+            df_inst = APILayer.fetch_finmind("TaiwanStockInstitutionalInvestorsBuySell", stock_id, 20)
             if not df_inst.empty:
                 df_inst['diff'] = df_inst['buy'] - df_inst['sell']
                 recent_date = df_inst['date'].max()
                 today_inst = df_inst[df_inst['date'] == recent_date]
                 foreign = today_inst[today_inst['name'].str.contains('外資', na=False)]['diff'].sum()
                 trust = today_inst[today_inst['name'].str.contains('投信', na=False)]['diff'].sum()
-                if foreign > 0 and trust > 0: chip_score += 5; chip_details.append("外資與投信同步買超 (+5分)")
-                elif foreign < 0 and trust < 0: chip_score -= 5; chip_details.append("外資與投信同步賣超 (-5分)")
-        except: pass
+                f_sheets = int(foreign / 1000)
+                t_sheets = int(trust / 1000)
+                if foreign > 0 and trust > 0: chip_score += 5; chip_details.append(f"外資與投信同步買超 (外資 {f_sheets}張, 投信 {t_sheets}張) (+5分)")
+                elif foreign < 0 and trust < 0: chip_score -= 5; chip_details.append(f"外資與投信同步賣超 (外資 {f_sheets}張, 投信 {t_sheets}張) (-5分)")
+                else: chip_details.append(f"法人動向分歧 (外資 {f_sheets}張, 投信 {t_sheets}張) (+0分)")
+            else: chip_details.append("三大法人：近期無資料")
+        except Exception as e: chip_details.append(f"三大法人：獲取失敗 ({str(e)})")
 
-        # 2. 千張大戶籌碼
         try:
-            df_shares = APILayer.fetch_finmind("TaiwanStockHoldingSharesPer", stock_id, 30)
+            df_shares = APILayer.fetch_finmind("TaiwanStockHoldingSharesPer", stock_id, 60)
             if not df_shares.empty:
                 df_shares['HoldingSharesLevel'] = df_shares['HoldingSharesLevel'].astype(str)
-                df_big = df_shares[df_shares['HoldingSharesLevel'] == '15'] # 15代表>1000張
+                df_big = df_shares[df_shares['HoldingSharesLevel'] == '15'].sort_values('date')
                 if len(df_big) >= 2:
                     latest_pct = df_big.iloc[-1]['percent']
                     prev_pct = df_big.iloc[-2]['percent']
-                    if latest_pct > prev_pct: chip_score += 5; chip_details.append(f"千張大戶持股增加至 {latest_pct}% (+5分)")
-                    else: chip_score -= 2; chip_details.append(f"千張大戶持股降至 {latest_pct}% (-2分)")
-        except: pass
+                    if latest_pct > prev_pct: chip_score += 5; chip_details.append(f"千張大戶持股增加：{prev_pct}% ➡️ {latest_pct}% (+5分)")
+                    elif latest_pct < prev_pct: chip_score -= 2; chip_details.append(f"千張大戶持股減少：{prev_pct}% ➡️ {latest_pct}% (-2分)")
+                    else: chip_details.append(f"千張大戶持股維持：{latest_pct}% (+0分)")
+                else: chip_details.append("千張大戶：資料筆數不足")
+            else: chip_details.append("千張大戶：近期無資料")
+        except Exception as e: chip_details.append(f"千張大戶：獲取失敗 ({str(e)})")
                     
-        # 3. 融資與借券賣出
         try:
-            df_margin = APILayer.fetch_finmind("TaiwanStockMarginPurchaseShortSale", stock_id, 10)
+            df_margin = APILayer.fetch_finmind("TaiwanStockMarginPurchaseShortSale", stock_id, 20)
             if not df_margin.empty:
                 df_margin = df_margin.sort_values('date')
                 if len(df_margin) >= 2:
                     margin_today = df_margin.iloc[-1]['MarginPurchaseTodayBalance']
                     margin_yest = df_margin.iloc[-2]['MarginPurchaseTodayBalance']
                     if margin_today > margin_yest: chip_score -= 2; chip_details.append("融資餘額(散戶)增加 (-2分)")
+                    else: chip_score += 2; chip_details.append("融資餘額(散戶)減少 (+2分)")
                     
                     short_today = df_margin.iloc[-1]['ShortSaleTodayBalance']
                     short_yest = df_margin.iloc[-2]['ShortSaleTodayBalance']
                     if short_today > short_yest * 1.05:
                         lending_warning = True
                         chip_score -= 5; chip_details.append("⚠️ 融券/借券賣出餘額顯著增加，有避險賣壓 (-5分)")
-        except: pass
+            else: chip_details.append("融資券：近期無資料")
+        except Exception as e: chip_details.append(f"融資券：獲取失敗 ({str(e)})")
             
         chip_score = max(0, min(20, chip_score))
         if not chip_details: chip_details.append("籌碼面數據無明顯變化 (中性)")
         return {"score": chip_score, "details": chip_details, "lending_warning": lending_warning}
 
 # ==========================================
-# 5. AI Score Engine (綜合評分引擎)
+# 5. Futures Engine (期貨引擎)
+# ==========================================
+class FuturesEngine:
+    @staticmethod
+    def analyze_futures() -> dict:
+        futures_score = 10
+        futures_details = []
+        try:
+            df_fut = APILayer.fetch_finmind("TaiwanFuturesInstitutionalInvestors", "TX", 10)
+            if not df_fut.empty:
+                df_foreign = df_fut[df_fut['name'] == '外資及陸資'].sort_values('date')
+                if len(df_foreign) >= 1:
+                    latest_oi = df_foreign.iloc[-1]['open_interest_netlot']
+                    if latest_oi > 10000: futures_score += 10; futures_details.append(f"📈 外資台指期淨多單高達 {latest_oi} 口，大盤極度偏多 (+10分)")
+                    elif latest_oi > 0: futures_score += 5; futures_details.append(f"📈 外資台指期淨多單 {latest_oi} 口，大盤偏多 (+5分)")
+                    elif latest_oi < -10000: futures_score -= 10; futures_details.append(f"📉 外資台指期淨空單高達 {latest_oi} 口，大盤極度偏空 (-10分)")
+                    elif latest_oi < 0: futures_score -= 5; futures_details.append(f"📉 外資台指期淨空單 {latest_oi} 口，大盤偏空 (-5分)")
+                    else: futures_details.append(f"外資台指期未平倉量為 {latest_oi} 口 (中性)")
+            else: futures_details.append("外資期貨未平倉：近期無資料")
+        except Exception as e: futures_details.append(f"期貨數據獲取失敗 ({str(e)})")
+            
+        futures_score = max(0, min(20, futures_score))
+        return {"score": futures_score, "details": futures_details}
+
+# ==========================================
+# 6. AI Score Engine (綜合評分引擎)
 # ==========================================
 class AIScoreEngine:
     @staticmethod
-    def calculate_score(stock_id: str, df: pd.DataFrame, patterns: dict, chip_data: dict, market_data: dict) -> dict:
+    def calculate_score(stock_id: str, df: pd.DataFrame, patterns: dict, chip_data: dict, market_data: dict = None) -> dict:
         today = df.iloc[-1]
         tech_score = 0
         tech_details = []
         
-        # 加入支撐與壓力
         tech_details.append(f"🎯 關鍵價位：近期支撐 {today['Support']:.2f} / 近期壓力 {today['Resistance']:.2f}")
         
         if today['MA5'] > today['MA20']: tech_score += 10; tech_details.append("短均線大於長均線，趨勢偏多 (+10分)")
@@ -202,7 +231,9 @@ class AIScoreEngine:
         pattern_score = max(0, min(20, pattern_score))
         if not pattern_details: pattern_details.append("目前無觸發特殊莎拉型態")
 
-        total_score = tech_score + pattern_score + chip_data["score"] + market_data["score"]
+        futures_data = FuturesEngine.analyze_futures()
+
+        total_score = tech_score + pattern_score + chip_data["score"] + futures_data["score"]
         
         if total_score >= 80: action = "強烈看多 (Strong Buy)"
         elif total_score >= 60: action = "偏多看待 (Buy)"
@@ -218,6 +249,6 @@ class AIScoreEngine:
                 "Technical (40%)": {"score": tech_score, "details": tech_details},
                 "Pattern (20%)": {"score": pattern_score, "details": pattern_details},
                 "Chip (20%)": {"score": chip_data["score"], "details": chip_data["details"], "lending_warning": chip_data["lending_warning"]},
-                "Market (20%)": {"score": market_data["score"], "details": market_data["details"]}
+                "Futures (20%)": {"score": futures_data["score"], "details": futures_data["details"]}
             }
         }
