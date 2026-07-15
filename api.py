@@ -1,34 +1,42 @@
 from fastapi import FastAPI, HTTPException
-import uvicorn
-from stock_ai_engine_v2 import APILayer, IndicatorEngine, PatternEngine, ChipEngine, AIScoreEngine
+from fastapi.middleware.cors import CORSMiddleware
+from stock_ai_engine_v2 import APILayer, IndicatorEngine, PatternEngine, MarketChipEngine, AIScoreEngine
 
-app = FastAPI(title="Stock AI Engine API", version="2.0")
+app = FastAPI(title="Stock AI Engine API")
+
+# 加入 CORS 確保 Dify 呼叫暢通無阻
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def root():
+    return {"status": "running", "message": "Stock AI Engine V2 is live!"}
 
 @app.get("/api/v1/analyze/{stock_id}")
-async def analyze_stock(stock_id: str):
+def analyze(stock_id: str):
     try:
-        # 1. 獲取 K 線數據
-        raw_df = APILayer.get_kline_data(stock_id, days=180)
+        print(f"📥 正在獲取 {stock_id} 的 K 線數據...")
+        df = APILayer.get_kline_data(stock_id)
         
-        # 2. 計算技術指標
-        ta_df = IndicatorEngine.add_all_indicators(raw_df)
+        print("🧮 正在計算技術指標與支撐壓力...")
+        df = IndicatorEngine.add_all_indicators(df)
         
-        # 3. 進行型態辨識
-        current_patterns = PatternEngine.analyze_patterns(ta_df)
+        print("🔍 正在進行莎拉型態辨識...")
+        patterns = PatternEngine.analyze_patterns(df)
         
-        # 4. 獲取籌碼數據 (三大法人、融資券、大戶)
-        chip_data = ChipEngine.analyze_chips(stock_id)
+        print("🕵️ 正在分析大戶與法人籌碼...")
+        chip_data = MarketChipEngine.analyze_chips(stock_id)
         
-        # 5. AI 綜合評分
-        ai_report = AIScoreEngine.calculate_score(stock_id, ta_df, current_patterns, chip_data)
+        print("⚖️ 正在計算 AI 綜合評分 (包含外資期貨)...")
+        # 呼叫評分引擎，產出最終報告
+        report = AIScoreEngine.calculate_score(stock_id, df, patterns, chip_data, {})
         
-        return ai_report
-        
-    except ValueError as ve:
-        raise HTTPException(status_code=404, detail=str(ve))
+        return report
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"伺服器內部錯誤: {str(e)}")
-
-if __name__ == "__main__":
-    print("🚀 正在啟動 Stock AI Engine API 伺服器...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"❌ 發生錯誤: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
