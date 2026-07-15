@@ -189,8 +189,9 @@ class FuturesEngine:
                 # 自動適應 FinMind 的期貨欄位名稱
                 col_name = 'institutional_investors' if 'institutional_investors' in df_fut.columns else 'name'
                 
-                # 篩選外資及陸資
-                df_foreign = df_fut[df_fut[col_name] == '外資及陸資'].sort_values('date')
+                # 🎯 關鍵修正：只要名稱包含「外資」就抓出來，解決 API 命名不一致的問題
+                df_foreign = df_fut[df_fut[col_name].str.contains('外資', na=False)].sort_values('date')
+                
                 if len(df_foreign) >= 1:
                     latest_row = df_foreign.iloc[-1]
                     
@@ -207,7 +208,9 @@ class FuturesEngine:
                     elif latest_oi < -10000: futures_score -= 10; futures_details.append(f"📉 外資台指期淨空單高達 {latest_oi} 口，大盤極度偏空 (-10分)")
                     elif latest_oi < 0: futures_score -= 5; futures_details.append(f"📉 外資台指期淨空單 {latest_oi} 口，大盤偏空 (-5分)")
                     else: futures_details.append(f"外資台指期未平倉量為 {latest_oi} 口 (中性)")
-            else: futures_details.append("外資期貨未平倉：近期無資料")
+                else:
+                    futures_details.append("外資期貨未平倉：近期無資料 (找不到外資欄位)")
+            else: futures_details.append("外資期貨未平倉：近期無資料 (API回傳空值)")
         except Exception as e: futures_details.append(f"期貨數據獲取失敗 ({str(e)})")
             
         futures_score = max(0, min(20, futures_score))
