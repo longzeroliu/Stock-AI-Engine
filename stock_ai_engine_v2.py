@@ -186,9 +186,22 @@ class FuturesEngine:
         try:
             df_fut = APILayer.fetch_finmind("TaiwanFuturesInstitutionalInvestors", "TX", 10)
             if not df_fut.empty:
-                df_foreign = df_fut[df_fut['name'] == '外資及陸資'].sort_values('date')
+                # 自動適應 FinMind 的期貨欄位名稱
+                col_name = 'institutional_investors' if 'institutional_investors' in df_fut.columns else 'name'
+                
+                # 篩選外資及陸資
+                df_foreign = df_fut[df_fut[col_name] == '外資及陸資'].sort_values('date')
                 if len(df_foreign) >= 1:
-                    latest_oi = df_foreign.iloc[-1]['open_interest_netlot']
+                    latest_row = df_foreign.iloc[-1]
+                    
+                    # 計算未平倉淨口數 (多單未平倉 - 空單未平倉)
+                    if 'open_interest_netlot' in df_foreign.columns:
+                        latest_oi = latest_row['open_interest_netlot']
+                    else:
+                        long_oi = latest_row.get('long_open_interest_balance_volume', 0)
+                        short_oi = latest_row.get('short_open_interest_balance_volume', 0)
+                        latest_oi = int(long_oi) - int(short_oi)
+                        
                     if latest_oi > 10000: futures_score += 10; futures_details.append(f"📈 外資台指期淨多單高達 {latest_oi} 口，大盤極度偏多 (+10分)")
                     elif latest_oi > 0: futures_score += 5; futures_details.append(f"📈 外資台指期淨多單 {latest_oi} 口，大盤偏多 (+5分)")
                     elif latest_oi < -10000: futures_score -= 10; futures_details.append(f"📉 外資台指期淨空單高達 {latest_oi} 口，大盤極度偏空 (-10分)")
