@@ -24,7 +24,7 @@ class APILayer:
         return pd.DataFrame()
 
     @staticmethod
-    def get_kline_data(stock_id: str, days: int = 180) -> pd.DataFrame:
+    def get_kline_data(stock_id: str, days: int = 400) -> pd.DataFrame:
         df = APILayer.fetch_finmind("TaiwanStockPrice", stock_id, days)
         if df.empty:
             raise ValueError(f"獲取 K 線失敗，請檢查股票代號 {stock_id}。")
@@ -36,35 +36,44 @@ class APILayer:
         return df
 
 # ==========================================
-# 2. Indicator Engine (技術指標引擎)
+# 2. Indicator Engine (技術指標與支撐壓力)
 # ==========================================
 class IndicatorEngine:
     @staticmethod
     def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df_ta = df.copy()
         df_ta['MA5'] = df_ta.ta.sma(length=5)
+        df_ta['MA10'] = df_ta.ta.sma(length=10)
         df_ta['MA20'] = df_ta.ta.sma(length=20)
         df_ta['MA60'] = df_ta.ta.sma(length=60)
+        df_ta['MA120'] = df_ta.ta.sma(length=120)
+        df_ta['MA240'] = df_ta.ta.sma(length=240)
+        
         macd = df_ta.ta.macd(fast=12, slow=26, signal=9)
         df_ta = pd.concat([df_ta, macd], axis=1)
         df_ta['RSI14'] = df_ta.ta.rsi(length=14)
         stoch = df_ta.ta.stoch(k=14, d=3, smooth_k=3)
         df_ta = pd.concat([df_ta, stoch], axis=1)
+        
+        bbands = df_ta.ta.bbands(length=20, std=2)
+        df_ta = pd.concat([df_ta, bbands], axis=1)
+        
+        # 計算近20日支撐與壓力
+        df_ta['Support'] = df_ta['Low'].rolling(20).min()
+        df_ta['Resistance'] = df_ta['High'].rolling(20).max()
+        
         df_ta.dropna(inplace=True)
         return df_ta
 
 # ==========================================
-# 3. Pattern Engine (型態辨識引擎)
+# 3. Pattern Engine (莎拉新新型態學)
 # ==========================================
 class PatternEngine:
     @staticmethod
     def analyze_patterns(df: pd.DataFrame) -> dict:
-        if len(df) < 30: return {}
+        if len(df) < 5: return {}
         today, yest, day3 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
         patterns = {}
-
-        patterns["均線多頭排列"] = bool(today['MA5'] > today['MA20'] > today['MA60'] and today['MA5'] > yest['MA5'])
-        patterns["均線空頭排列"] = bool(today['MA5'] < today['MA20'] < today['MA60'])
 
         is_red_today = today['Close'] > today['Open']
         is_red_yest = yest['Close'] > yest['Open']
@@ -73,34 +82,48 @@ class PatternEngine:
         is_black_yest = yest['Close'] < yest['Open']
         is_black_day3 = day3['Close'] < day3['Open']
 
-        patterns["紅三兵"] = bool(is_red_today and is_red_yest and is_red_day3 and today['Close'] > yest['Close'] > day3['Close'])
-        patterns["黑三兵"] = bool(is_black_today and is_black_yest and is_black_day3 and today['Close'] < yest['Close'] < day3['Close'])
+        patterns["莎拉_正多頭開花"] = bool(today['MA5'] > today['MA10'] > today['MA20'] > today['MA60'] > today['MA120'] > today['MA240'])
+        ma60_up = today['MA60'] > yest['MA60']
+        break_long = (today['Close'] > today['MA120'] and yest['Close'] <= yest['MA120']) or (today['Close'] > today['MA240'] and yest['Close'] <= yest['MA240'])
+        patterns["莎拉_金包銀"] = bool(ma60_up and today['Close'] > today['MA60'] and break_long)
 
-        body_yest = abs(yest['Close'] - yest['Open'])
-        patterns["晨星"] = bool(is_black_day3 and is_red_today and body_yest < (yest['Close'] * 0.01) and today['Close'] > (day3['Open'] + day3['Close']) / 2)
+        bias_60 = (today['Close'] - today['MA60']) / today['MA60']
+        patterns["莎拉_正乖離過大(牽狗繩)"] = bool(bias_60 > 0.15)
+        patterns["莎拉_負乖離過大(牽狗繩)"] = bool(bias_60 < -0.15)
 
-        recent_30 = df['Close'].tail(30).values
-        local_minima = [(i, recent_30[i]) for i in range(1, 29) if recent_30[i] < recent_30[i-1] and recent_30[i] < recent_30[i+1]]
-        is_w_bottom = False
-        if len(local_minima) >= 2:
-            idx1, val1 = local_minima[-2]
-            idx2, val2 = local_minima[-1]
-            if (idx2 - idx1) >= 3 and abs(val1 - val2) / val1 < 0.03:
-                neckline = max(recent_30[idx1:idx2])
-                if today['Close'] > neckline or (today['Close'] > val2 * 1.02):
-                    is_w_bottom = True
-        patterns["W底"] = is_w_bottom
+        patterns["莎拉_小碎步"] = bool(is_red_today and is_red_yest and is_red_day3 and today['Close'] > yest['Close'] > day3['Close'])
+        patterns["莎拉_下樓梯"] = bool(is_black_today and is_black_yest and is_black_day3 and today['Close'] < yest['Close'] < day3['Close'])
+
+        if 'BBU_20_2.0' in today and 'BBL_20_2.0' in today:
+            patterns["莎拉_穿心箭"] = bool(day3['High'] > day3['BBU_20_2.0'] and today['Close'] < today['BBU_20_2.0'] and yest['Close'] < yest['BBU_20_2.0'])
+            patterns["莎拉_有底撐"] = bool(day3['Low'] < day3['BBL_20_2.0'] and today['Close'] > today['BBL_20_2.0'] and today['Low'] >= day3['Low'])
+
         return patterns
 
 # ==========================================
-# 4. Chip Engine (籌碼引擎)
+# 4. Market & Chip Engine (大盤與籌碼引擎)
 # ==========================================
-class ChipEngine:
+class MarketChipEngine:
+    @staticmethod
+    def analyze_market() -> dict:
+        try:
+            df_taiex = APILayer.fetch_finmind("TaiwanStockPrice", "TAIEX", 60)
+            if not df_taiex.empty:
+                df_taiex['close'] = pd.to_numeric(df_taiex['close'])
+                ma5 = df_taiex['close'].rolling(5).mean().iloc[-1]
+                ma20 = df_taiex['close'].rolling(20).mean().iloc[-1]
+                if ma5 > ma20: return {"score": 10, "details": ["大盤 (TAIEX) 站上月線，整體市場氣氛偏多 (+10分)"]}
+                else: return {"score": 0, "details": ["大盤 (TAIEX) 跌破月線，需留意系統性風險 (+0分)"]}
+        except: pass
+        return {"score": 5, "details": ["大盤數據獲取異常 (預設中性)"]}
+
     @staticmethod
     def analyze_chips(stock_id: str) -> dict:
         chip_score = 10
         chip_details = []
         lending_warning = False
+        
+        # 1. 三大法人
         try:
             df_inst = APILayer.fetch_finmind("TaiwanStockInstitutionalInvestorsBuySell", stock_id, 10)
             if not df_inst.empty:
@@ -111,25 +134,37 @@ class ChipEngine:
                 trust = today_inst[today_inst['name'].str.contains('投信', na=False)]['diff'].sum()
                 if foreign > 0 and trust > 0: chip_score += 5; chip_details.append("外資與投信同步買超 (+5分)")
                 elif foreign < 0 and trust < 0: chip_score -= 5; chip_details.append("外資與投信同步賣超 (-5分)")
-                elif foreign > 0: chip_score += 3; chip_details.append("外資買超 (+3分)")
-                elif foreign < 0: chip_score -= 3; chip_details.append("外資賣超 (-3分)")
+        except: pass
+
+        # 2. 千張大戶籌碼
+        try:
+            df_shares = APILayer.fetch_finmind("TaiwanStockHoldingSharesPer", stock_id, 30)
+            if not df_shares.empty:
+                df_shares['HoldingSharesLevel'] = df_shares['HoldingSharesLevel'].astype(str)
+                df_big = df_shares[df_shares['HoldingSharesLevel'] == '15'] # 15代表>1000張
+                if len(df_big) >= 2:
+                    latest_pct = df_big.iloc[-1]['percent']
+                    prev_pct = df_big.iloc[-2]['percent']
+                    if latest_pct > prev_pct: chip_score += 5; chip_details.append(f"千張大戶持股增加至 {latest_pct}% (+5分)")
+                    else: chip_score -= 2; chip_details.append(f"千張大戶持股降至 {latest_pct}% (-2分)")
+        except: pass
                     
+        # 3. 融資與借券賣出
+        try:
             df_margin = APILayer.fetch_finmind("TaiwanStockMarginPurchaseShortSale", stock_id, 10)
             if not df_margin.empty:
                 df_margin = df_margin.sort_values('date')
                 if len(df_margin) >= 2:
                     margin_today = df_margin.iloc[-1]['MarginPurchaseTodayBalance']
                     margin_yest = df_margin.iloc[-2]['MarginPurchaseTodayBalance']
-                    if margin_today > margin_yest: chip_score -= 2; chip_details.append("融資餘額增加 (-2分)")
-                    else: chip_score += 2; chip_details.append("融資餘額減少 (+2分)")
+                    if margin_today > margin_yest: chip_score -= 2; chip_details.append("融資餘額(散戶)增加 (-2分)")
                     
                     short_today = df_margin.iloc[-1]['ShortSaleTodayBalance']
                     short_yest = df_margin.iloc[-2]['ShortSaleTodayBalance']
                     if short_today > short_yest * 1.05:
                         lending_warning = True
-                        chip_score -= 3; chip_details.append("⚠️ 融券/借券餘額顯著增加 (-3分)")
-        except Exception as e:
-            chip_details.append(f"籌碼數據獲取異常: {str(e)}")
+                        chip_score -= 5; chip_details.append("⚠️ 融券/借券賣出餘額顯著增加，有避險賣壓 (-5分)")
+        except: pass
             
         chip_score = max(0, min(20, chip_score))
         if not chip_details: chip_details.append("籌碼面數據無明顯變化 (中性)")
@@ -140,38 +175,34 @@ class ChipEngine:
 # ==========================================
 class AIScoreEngine:
     @staticmethod
-    def calculate_score(stock_id: str, df: pd.DataFrame, patterns: dict, chip_data: dict) -> dict:
+    def calculate_score(stock_id: str, df: pd.DataFrame, patterns: dict, chip_data: dict, market_data: dict) -> dict:
         today = df.iloc[-1]
         tech_score = 0
         tech_details = []
         
+        # 加入支撐與壓力
+        tech_details.append(f"🎯 關鍵價位：近期支撐 {today['Support']:.2f} / 近期壓力 {today['Resistance']:.2f}")
+        
         if today['MA5'] > today['MA20']: tech_score += 10; tech_details.append("短均線大於長均線，趨勢偏多 (+10分)")
-        else: tech_details.append("短均線小於長均線，趨勢偏空 (+0分)")
         if today.get('MACDh_12_26_9', 0) > 0: tech_score += 10; tech_details.append("MACD 柱狀圖翻紅，多方動能強 (+10分)")
-        else: tech_details.append("MACD 柱狀圖為綠，空方動能強 (+0分)")
         if 50 <= today['RSI14'] <= 80: tech_score += 10; tech_details.append("RSI 處於 50~80 強勢區間 (+10分)")
         elif today['RSI14'] < 30: tech_score += 5; tech_details.append("RSI 低於 30，超賣醞釀反彈 (+5分)")
-        else: tech_details.append("RSI 處於弱勢或超買區間 (+0分)")
-        if today.get('STOCHk_14_3_3', 0) > today.get('STOCHd_14_3_3', 0): tech_score += 10; tech_details.append("KD 指標 K值大於D值，呈現多頭 (+10分)")
-        else: tech_details.append("KD 指標死亡交叉或偏空 (+0分)")
 
         pattern_score = 10 
         pattern_details = []
-        if patterns.get("W底"): pattern_score += 10; pattern_details.append("出現 W底 底部反轉型態 (+10分)")
-        if patterns.get("紅三兵"): pattern_score += 5; pattern_details.append("出現 紅三兵 強勢攻擊型態 (+5分)")
-        if patterns.get("晨星"): pattern_score += 5; pattern_details.append("出現 晨星 止跌回升型態 (+5分)")
-        if patterns.get("均線多頭排列"): pattern_score += 5; pattern_details.append("均線呈現完美多頭排列 (+5分)")
-        if patterns.get("黑三兵"): pattern_score -= 5; pattern_details.append("出現 黑三兵 弱勢下跌型態 (-5分)")
-        if patterns.get("均線空頭排列"): pattern_score -= 5; pattern_details.append("均線呈現空頭排列 (-5分)")
+        if patterns.get("莎拉_正多頭開花"): pattern_score += 10; pattern_details.append("🌸 [莎拉型態] 正多頭開花：均線完美發散 (+10分)")
+        if patterns.get("莎拉_金包銀"): pattern_score += 10; pattern_details.append("🥇 [莎拉型態] 金包銀：突破長均線壓力 (+10分)")
+        if patterns.get("莎拉_小碎步"): pattern_score += 5; pattern_details.append("🚶 [莎拉型態] 小碎步：多方量縮推升 (+5分)")
+        if patterns.get("莎拉_有底撐"): pattern_score += 5; pattern_details.append("🛡️ [莎拉型態] 有底撐：低檔反轉 (+5分)")
+        if patterns.get("莎拉_下樓梯"): pattern_score -= 5; pattern_details.append("📉 [莎拉型態] 下樓梯：高檔走勢轉弱 (-5分)")
+        if patterns.get("莎拉_穿心箭"): pattern_score -= 10; pattern_details.append("🏹 [莎拉型態] 穿心箭：短線逃頂訊號 (-10分)")
+        if patterns.get("莎拉_正乖離過大(牽狗繩)"): pattern_score -= 5; pattern_details.append("🐕 [莎拉型態] 牽狗繩：正乖離過大，留意回檔 (-5分)")
+        if patterns.get("莎拉_負乖離過大(牽狗繩)"): pattern_score += 5; pattern_details.append("🐕 [莎拉型態] 牽狗繩：負乖離過大，醞釀反彈 (+5分)")
+
         pattern_score = max(0, min(20, pattern_score))
-        if not pattern_details: pattern_details.append("目前無明顯特殊 K 線型態")
+        if not pattern_details: pattern_details.append("目前無觸發特殊莎拉型態")
 
-        chip_score = chip_data["score"]
-        chip_details = chip_data["details"]
-        futures_score = 10
-        futures_details = ["期貨大盤數據尚未串接 (預設中性 10分)"]
-
-        total_score = tech_score + pattern_score + chip_score + futures_score
+        total_score = tech_score + pattern_score + chip_data["score"] + market_data["score"]
         
         if total_score >= 80: action = "強烈看多 (Strong Buy)"
         elif total_score >= 60: action = "偏多看待 (Buy)"
@@ -186,7 +217,7 @@ class AIScoreEngine:
             "breakdown": {
                 "Technical (40%)": {"score": tech_score, "details": tech_details},
                 "Pattern (20%)": {"score": pattern_score, "details": pattern_details},
-                "Chip (20%)": {"score": chip_score, "details": chip_details, "lending_warning": chip_data["lending_warning"]},
-                "Futures (20%)": {"score": futures_score, "details": futures_details}
+                "Chip (20%)": {"score": chip_data["score"], "details": chip_data["details"], "lending_warning": chip_data["lending_warning"]},
+                "Market (20%)": {"score": market_data["score"], "details": market_data["details"]}
             }
         }
